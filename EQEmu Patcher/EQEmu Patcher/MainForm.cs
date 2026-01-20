@@ -18,15 +18,11 @@ namespace EQEmu_Patcher
     {
 
         public static string serverName; // server title name
-        public static string filelistUrl; //filelist url
-        public static string patcherUrl; //patcher url e.g. eqemupatcher-hash.txt
         public static string version; //version of file
         string fileName; //base name of executable
         bool isPatching = false;
         bool isPatchCancelled = false;
         bool isPendingPatch = false; // This is used to indicate that someone pressed "Patch" before we did some background update checks
-        string myHash; //my MD5 generated hash
-        bool isNeedingSelfUpdate;
         bool isLoading;
         bool isAutoPatch = false;
         bool isAutoPlay = false;
@@ -84,28 +80,7 @@ namespace EQEmu_Patcher
                 return;
             }
 
-            filelistUrl = Assembly.GetExecutingAssembly().GetCustomAttribute<FileListUrl>().Value;
-#if (DEBUG)
-            filelistUrl = "https://github.com/xackery/eqemupatcher/releases/latest/download";
-#endif
-            if (filelistUrl == "") {
-                MessageBox.Show("This patcher was built incorrectly. Please contact the distributor of this and inform them the file list url is not provided or screenshot this message.", serverName);
-                this.Close();
-                return;
-            }
-            if (!filelistUrl.EndsWith("/")) filelistUrl += "/";
-
-            patcherUrl = Assembly.GetExecutingAssembly().GetCustomAttribute<PatcherUrl>().Value;
-#if (DEBUG)
-            patcherUrl = $"https://github.com/xackery/eqemupatcher/releases/latest/download/";
-#endif
-            if (patcherUrl == "")
-            {
-                MessageBox.Show("This patcher was built incorrectly. Please contact the distributor of this and inform them the patcher url is not provided or screenshot this message.", serverName);
-                this.Close();
-                return;
-            }
-            if (!patcherUrl.EndsWith("/")) patcherUrl += "/";
+            // filelistUrl and patcherUrl no longer needed - we download directly from Spire
 
             txtList.Visible = false;
             splashLogo.Visible = true;
