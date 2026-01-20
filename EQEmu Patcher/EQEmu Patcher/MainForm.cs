@@ -401,11 +401,12 @@ namespace EQEmu_Patcher
         }
 
         // Spire API endpoints for dynamic client files
+        // Key = local file path (relative to EQ folder), Value = Spire API endpoint
         private static readonly Dictionary<string, string> SpireExports = new Dictionary<string, string>
         {
             { "spells_us.txt", "eqemuserver/export-client-file/spells" },
-            { "SkillCaps.txt", "eqemuserver/export-client-file/skills" },
-            { "BaseData.txt", "eqemuserver/export-client-file/basedata" },
+            { "Resources\\SkillCaps.txt", "eqemuserver/export-client-file/skills" },
+            { "Resources\\BaseData.txt", "eqemuserver/export-client-file/basedata" },
             { "dbstr_us.txt", "eqemuserver/export-client-file/dbstring" }
         };
 
@@ -431,30 +432,38 @@ namespace EQEmu_Patcher
                     return;
                 }
 
-                string spireFileName = spireFile.Key;
+                string spireFilePath = spireFile.Key;
                 string endpoint = spireFile.Value;
                 string url = SpireBaseUrl + endpoint;
-                string localPath = Path.GetDirectoryName(Application.ExecutablePath) + "\\" + spireFileName;
+                string localPath = Path.GetDirectoryName(Application.ExecutablePath) + "\\" + spireFilePath;
+                string displayName = Path.GetFileName(spireFilePath);
 
                 try
                 {
-                    StatusLibrary.Log($"Downloading {spireFileName}...");
+                    // Create directory if needed (for Resources subfolder)
+                    string dir = Path.GetDirectoryName(localPath);
+                    if (!Directory.Exists(dir))
+                    {
+                        Directory.CreateDirectory(dir);
+                    }
+
+                    StatusLibrary.Log($"Downloading {displayName}...");
                     var data = await Download(cts, url);
                     if (data != null && data.Length > 0)
                     {
                         File.WriteAllBytes(localPath, data);
-                        StatusLibrary.Log($"  {spireFileName} ({generateSize(data.Length)})");
+                        StatusLibrary.Log($"  {displayName} ({generateSize(data.Length)})");
                         spireFileCount++;
                         totalBytes += data.Length;
                     }
                     else
                     {
-                        StatusLibrary.Log($"  Warning: {spireFileName} was empty or failed");
+                        StatusLibrary.Log($"  Warning: {displayName} was empty or failed");
                     }
                 }
                 catch (Exception ex)
                 {
-                    StatusLibrary.Log($"  Failed to download {spireFileName}: {ex.Message}");
+                    StatusLibrary.Log($"  Failed to download {displayName}: {ex.Message}");
                 }
 
                 StatusLibrary.SetProgress((int)(((spireFileCount) / (double)SpireExports.Count) * 10000));
