@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
@@ -482,11 +482,65 @@ namespace EQEmu_Patcher
             });
         }
 
+        // Spire API endpoints for dynamic client files
+        private static readonly Dictionary<string, string> SpireExports = new Dictionary<string, string>
+        {
+            { "spells_us.txt", "eqemuserver/export-client-file/spells" },
+            { "SkillCaps.txt", "eqemuserver/export-client-file/skills" },
+            { "BaseData.txt", "eqemuserver/export-client-file/basedata" },
+            { "dbstr_us.txt", "eqemuserver/export-client-file/dbstring" }
+        };
+
+        // Base URL for Spire API - change this to your server
+        private static readonly string SpireBaseUrl = "http://mud.sunburnt.country:3000/api/v1/";
+
         private async Task AsyncPatch()
         {
             Stopwatch start = Stopwatch.StartNew();
             StatusLibrary.Log($"Patching with patcher version {version}...");
             StatusLibrary.SetProgress(0);
+
+            // First, always download the 4 Spire export files (these are dynamic from database)
+            StatusLibrary.Log("Downloading server data files from Spire...");
+            int spireFileCount = 0;
+            foreach (var spireFile in SpireExports)
+            {
+                if (isPatchCancelled)
+                {
+                    StatusLibrary.Log("Patching cancelled.");
+                    return;
+                }
+
+                string spireFileName = spireFile.Key;
+                string endpoint = spireFile.Value;
+                string url = SpireBaseUrl + endpoint;
+                string localPath = Path.GetDirectoryName(Application.ExecutablePath) + "\\" + spireFileName;
+
+                try
+                {
+                    StatusLibrary.Log($"Downloading {spireFileName}...");
+                    var data = await Download(cts, url);
+                    if (data != null && data.Length > 0)
+                    {
+                        File.WriteAllBytes(localPath, data);
+                        StatusLibrary.Log($"  {spireFileName} ({generateSize(data.Length)})");
+                        spireFileCount++;
+                    }
+                    else
+                    {
+                        StatusLibrary.Log($"  Warning: {spireFileName} was empty or failed");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    StatusLibrary.Log($"  Failed to download {spireFileName}: {ex.Message}");
+                }
+
+                StatusLibrary.SetProgress((int)((spireFileCount / (double)SpireExports.Count) * 2000)); // 0-20% progress
+            }
+            StatusLibrary.Log($"Downloaded {spireFileCount} server data files.");
+
+            // Now proceed with normal filelist-based patching
             FileList filelist;
 
             using (var input = File.OpenText($"{System.IO.Path.GetDirectoryName(Application.ExecutablePath)}\\filelist.yml"))
@@ -511,7 +565,7 @@ namespace EQEmu_Patcher
             if (myHash != "" && isNeedingSelfUpdate)
             {
                 StatusLibrary.Log("Self update needed, starting with self patch...");
-                string url = $"{patcherUrl}/{fileName}.exe";
+                string url = $"{patcherUrl}/{this.fileName}.exe";
                 try
                 {
                     var data = await Download(cts, url);
@@ -543,7 +597,15 @@ namespace EQEmu_Patcher
                     return;
                 }
 
-                StatusLibrary.SetProgress((int)(currentBytes / totalBytes * 10000));
+                // Skip files we already downloaded from Spire
+                if (SpireExports.ContainsKey(entry.name))
+                {
+                    currentBytes += entry.size;
+                    continue;
+                }
+
+                // Calculate progress: 20% was Spire files, remaining 80% is filelist
+                StatusLibrary.SetProgress(2000 + (int)(currentBytes / totalBytes * 8000));
 
                 var path = Path.GetDirectoryName(Application.ExecutablePath)+"\\"+entry.name.Replace("/", "\\");
                 if (!UtilityLibrary.IsPathChild(path))
@@ -563,21 +625,20 @@ namespace EQEmu_Patcher
                     Console.WriteLine($"{path} {md5} vs {entry.md5}");
                 }
 
+                string url = filelist.downloadprefix + entry.name.Replace("\\", "/");
 
-            string url = "https://patch.heroesjourneyemu.com/rof/"  + entry.name.Replace("\\", "/");
-            string backupUrl = filelist.downloadprefix + entry.name.Replace("\\", "/");
-
-            string resp = await DownloadFile(cts, url, entry.name);
-            if (resp != "")
-            {
-                resp = await DownloadFile(cts, backupUrl, entry.name);
-                if (resp == "404")
+                string resp = await DownloadFile(cts, url, entry.name);
+                if (resp != "")
                 {
-                    StatusLibrary.Log($"Failed to download {entry.name} ({generateSize(entry.size)}) from {url} and {filelist.downloadprefix}, 404 error (website may be down?)");
+                    if (resp == "404")
+                    {
+                        StatusLibrary.Log($"Failed to download {entry.name} ({generateSize(entry.size)}) from {url}, 404 error (website may be down?)");
+                        return;
+                    }
+                    StatusLibrary.Log($"Failed to download {entry.name}: {resp}");
                     return;
                 }
-            }
-            StatusLibrary.Log($"{entry.name} ({generateSize(entry.size)})");
+                StatusLibrary.Log($"{entry.name} ({generateSize(entry.size)})");
 
                 currentBytes += entry.size;
                 patchedBytes += entry.size;
