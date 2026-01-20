@@ -207,66 +207,9 @@ namespace EQEmu_Patcher
                 });
             }));
 
-            string webUrl = $"{filelistUrl}{suffix}/filelist_{suffix}.yml";
-
-            string response = await DownloadFile(cts, webUrl, "filelist.yml");
-            if (response != "")
-            {
-                webUrl = $"{filelistUrl}/filelist_{ suffix}.yml";
-                response = await DownloadFile(cts, webUrl, "filelist.yml");
-                if (response != "")
-                {
-                    MessageBox.Show("Failed to fetch filelist from " + webUrl + ": " + response);
-                    this.Close();
-                    return;
-                }
-            }
-
-            string url = $"{patcherUrl}{fileName}-hash.txt";
-            try
-            {
-                var data = await Download(cts, url);
-                response = System.Text.Encoding.Default.GetString(data).ToUpper();
-            } catch (Exception ex)
-            {
-                Console.WriteLine($"Failed to fetch patch from {url}: {ex.Message}");
-            }
-
-            if (response != "")
-            {
-                myHash = UtilityLibrary.GetMD5(Application.ExecutablePath);
-                if (response != myHash)
-                {
-                    isNeedingSelfUpdate = true;
-                    //StatusLibrary.Log($"{myHash} vs {response} selfpatch");
-                    if (!isPendingPatch)
-                    {
-                        btnCheck.BackColor = Color.Red;
-                    }
-                }
-            }
-
-            FileList filelist;
-
-            using (var input = File.OpenText($"{System.IO.Path.GetDirectoryName(Application.ExecutablePath)}\\filelist.yml"))
-            {
-                var deserializerBuilder = new DeserializerBuilder().WithNamingConvention(new CamelCaseNamingConvention());
-
-                var deserializer = deserializerBuilder.Build();
-
-                filelist = deserializer.Deserialize<FileList>(input);
-            }
-
-            if (filelist.version != IniLibrary.instance.LastPatchedVersion)
-            {
-                if (!isPendingPatch)
-                {
-                    btnCheck.BackColor = Color.Red;
-                }
-            } else
-            {
-            }
+            // No filelist needed - we download directly from Spire each time
             isLoading = false;
+            
             var path = System.IO.Path.GetDirectoryName(Application.ExecutablePath) + "\\eqemupatcher.png";
             if (File.Exists(path))
             {
@@ -500,9 +443,11 @@ namespace EQEmu_Patcher
             StatusLibrary.Log($"Patching with patcher version {version}...");
             StatusLibrary.SetProgress(0);
 
-            // First, always download the 4 Spire export files (these are dynamic from database)
-            StatusLibrary.Log("Downloading server data files from Spire...");
+            // Download the 4 Spire export files (dynamic from database)
+            StatusLibrary.Log("Downloading server data files...");
             int spireFileCount = 0;
+            double totalBytes = 0;
+
             foreach (var spireFile in SpireExports)
             {
                 if (isPatchCancelled)
@@ -525,6 +470,7 @@ namespace EQEmu_Patcher
                         File.WriteAllBytes(localPath, data);
                         StatusLibrary.Log($"  {spireFileName} ({generateSize(data.Length)})");
                         spireFileCount++;
+                        totalBytes += data.Length;
                     }
                     else
                     {
@@ -536,155 +482,20 @@ namespace EQEmu_Patcher
                     StatusLibrary.Log($"  Failed to download {spireFileName}: {ex.Message}");
                 }
 
-                StatusLibrary.SetProgress((int)((spireFileCount / (double)SpireExports.Count) * 2000)); // 0-20% progress
-            }
-            StatusLibrary.Log($"Downloaded {spireFileCount} server data files.");
-
-            // Now proceed with normal filelist-based patching
-            FileList filelist;
-
-            using (var input = File.OpenText($"{System.IO.Path.GetDirectoryName(Application.ExecutablePath)}\\filelist.yml"))
-            {
-                var deserializerBuilder = new DeserializerBuilder().WithNamingConvention(new CamelCaseNamingConvention());
-
-                var deserializer = deserializerBuilder.Build();
-
-                filelist = deserializer.Deserialize<FileList>(input);
-            }
-
-            double totalBytes = 0; //total patch size
-            double currentBytes = 1; // current patched size
-            double patchedBytes = 0; // how many files patched size
-
-            foreach (var entry in filelist.downloads)
-            {
-                totalBytes += entry.size;
-            }
-            if (totalBytes == 0) totalBytes = 1;
-
-            if (myHash != "" && isNeedingSelfUpdate)
-            {
-                StatusLibrary.Log("Self update needed, starting with self patch...");
-                string url = $"{patcherUrl}/{this.fileName}.exe";
-                try
-                {
-                    var data = await Download(cts, url);
-                    if (File.Exists(Application.ExecutablePath + ".old")) {
-                        File.Delete(Application.ExecutablePath + ".old");
-                    }
-                    File.Move(Application.ExecutablePath, Application.ExecutablePath + ".old");
-                    using (var w = File.Create(Application.ExecutablePath))
-                    {
-                        await w.WriteAsync(data, 0, data.Length, cts.Token);
-                    }
-                    StatusLibrary.Log($"Self update of {generateSize(data.Length)} will be used next run");
-
-                } catch (Exception e)
-                {
-                    StatusLibrary.Log($"Self update failed {url}: {e.Message}");
-                }
-                isNeedingSelfUpdate = false;
-
-                StatusLibrary.Log("Resuming patching...");
-            }
-            if (!filelist.downloadprefix.EndsWith("/")) filelist.downloadprefix += "/";
-            foreach (var entry in filelist.downloads)
-            {
-                if (isPatchCancelled)
-                {
-                    Console.WriteLine("cancelled while downloading");
-                    StatusLibrary.Log("Patching cancelled.");
-                    return;
-                }
-
-                // Skip files we already downloaded from Spire
-                if (SpireExports.ContainsKey(entry.name))
-                {
-                    currentBytes += entry.size;
-                    continue;
-                }
-
-                // Calculate progress: 20% was Spire files, remaining 80% is filelist
-                StatusLibrary.SetProgress(2000 + (int)(currentBytes / totalBytes * 8000));
-
-                var path = Path.GetDirectoryName(Application.ExecutablePath)+"\\"+entry.name.Replace("/", "\\");
-                if (!UtilityLibrary.IsPathChild(path))
-                {
-                    StatusLibrary.Log("Path " + path + " might be outside of your Everquest directory. Skipping download to this location.");
-                    continue;
-                }
-
-                // check if file exists and is already patched
-                if (File.Exists(path)) {
-                    var md5 = UtilityLibrary.GetMD5(path);
-                    if (md5.ToUpper() == entry.md5.ToUpper())
-                    {
-                        currentBytes += entry.size;
-                        continue;
-                    }
-                    Console.WriteLine($"{path} {md5} vs {entry.md5}");
-                }
-
-                string url = filelist.downloadprefix + entry.name.Replace("\\", "/");
-
-                string resp = await DownloadFile(cts, url, entry.name);
-                if (resp != "")
-                {
-                    if (resp == "404")
-                    {
-                        StatusLibrary.Log($"Failed to download {entry.name} ({generateSize(entry.size)}) from {url}, 404 error (website may be down?)");
-                        return;
-                    }
-                    StatusLibrary.Log($"Failed to download {entry.name}: {resp}");
-                    return;
-                }
-                StatusLibrary.Log($"{entry.name} ({generateSize(entry.size)})");
-
-                currentBytes += entry.size;
-                patchedBytes += entry.size;
-            }
-
-            if (filelist.deletes != null && filelist.deletes.Count > 0)
-            {
-                foreach (var entry in filelist.deletes)
-                {
-                    var path = Path.GetDirectoryName(Application.ExecutablePath) + "\\" + entry.name.Replace("/", "\\");
-                    if (isPatchCancelled)
-                    {
-                        Console.WriteLine("cancellled while deleting");
-                        StatusLibrary.Log("Patching cancelled.");
-                        return;
-                    }
-                    if (!UtilityLibrary.IsPathChild(path))
-                    {
-                        StatusLibrary.Log("Path " + entry.name + " might be outside your Everquest directory. Skipping deletion of this file.");
-                        continue;
-                    }
-                    if (File.Exists(path))
-                    {
-                        StatusLibrary.Log("Deleting " + entry.name + "...");
-                        File.Delete(path);
-                    }
-                }
+                StatusLibrary.SetProgress((int)(((spireFileCount) / (double)SpireExports.Count) * 10000));
             }
 
             StatusLibrary.SetProgress(10000);
-            if (patchedBytes == 0)
-            {
-                string version = filelist.version;
-                if (version.Length >= 8)
-                {
-                    version = version.Substring(0, 8);
-                }
-
-                StatusLibrary.Log($"Up to date with patch {version}.");
-                return;
-            }
-
             string elapsed = start.Elapsed.ToString("ss\\.ff");
-            StatusLibrary.Log($"Complete! Patched {generateSize(patchedBytes)} in {elapsed} seconds. Press Play to begin.");
-            IniLibrary.instance.LastPatchedVersion = filelist.version;
-            IniLibrary.Save();
+            
+            if (spireFileCount == SpireExports.Count)
+            {
+                StatusLibrary.Log($"Complete! Downloaded {spireFileCount} files ({generateSize(totalBytes)}) in {elapsed} seconds. Press Play to begin.");
+            }
+            else
+            {
+                StatusLibrary.Log($"Finished with warnings. Downloaded {spireFileCount}/{SpireExports.Count} files in {elapsed} seconds.");
+            }
             return;
         }
 
