@@ -9,8 +9,8 @@ on:
 env:
   VERSION: 1.0.6
   BUILD_CONFIGURATION: Release
-  SERVER_NAME: ${{ vars.SERVER_NAME == '' && 'Sunburnt Country' || vars.SERVER_NAME }}
-  FILE_NAME: ${{ vars.FILE_NAME == '' && 'sunburntpatcher' || vars.FILE_NAME }}
+  SERVER_NAME: ${{ vars.SERVER_NAME == '' && 'Gods of Norrath' || vars.SERVER_NAME }}
+  FILE_NAME: ${{ vars.FILE_NAME == '' && 'gods_of_norrath' || vars.FILE_NAME }}
 
 jobs:
   build:
