@@ -417,6 +417,12 @@ namespace EQEmu_Patcher
         // GitHub manifest URL for static file patching
         private static readonly string ManifestUrl = "https://raw.githubusercontent.com/atroche/eqemupatcher/refs/heads/master/manifest.json";
 
+        // Whitelist of static files to patch from manifest (only these will be downloaded)
+        private static readonly HashSet<string> ManifestFilesWhitelist = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "Resources/GlobalLoad_chr.txt"
+        };
+
         private async Task AsyncPatch()
         {
             Stopwatch start = Stopwatch.StartNew();
@@ -517,13 +523,20 @@ namespace EQEmu_Patcher
                         int manifestFilesTotal = manifest.files.Count;
                         List<KeyValuePair<string, string>> filesToDownload = new List<KeyValuePair<string, string>>();
 
-                        // First pass: check which files need updating
+                        // First pass: check which files need updating (only whitelisted files)
                         foreach (var fileEntry in manifest.files)
                         {
                             if (isPatchCancelled)
                             {
                                 StatusLibrary.Log("Patching cancelled.");
                                 return;
+                            }
+
+                            // Skip files not in whitelist
+                            if (!ManifestFilesWhitelist.Contains(fileEntry.Key))
+                            {
+                                manifestFilesChecked++;
+                                continue;
                             }
 
                             string relativePath = fileEntry.Key.Replace("/", "\\");
