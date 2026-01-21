@@ -10,6 +10,7 @@ using YamlDotNet.Serialization.NamingConventions;
 using Microsoft.WindowsAPICodePack.Taskbar;
 using System.Diagnostics;
 using System.Threading;
+using System.Web.Script.Serialization;
 
 namespace EQEmu_Patcher
 {
@@ -413,16 +414,23 @@ namespace EQEmu_Patcher
         // Base URL for Spire API - change this to your server
         private static readonly string SpireBaseUrl = "http://mud.sunburnt.country:3000/api/v1/";
 
+        // GitHub manifest URL for static file patching
+        private static readonly string ManifestUrl = "https://raw.githubusercontent.com/atroche/eqemupatcher/refs/heads/master/manifest.json";
+
         private async Task AsyncPatch()
         {
             Stopwatch start = Stopwatch.StartNew();
             StatusLibrary.Log($"Patching with patcher version {version}...");
             StatusLibrary.SetProgress(0);
 
-            // Download the 4 Spire export files (dynamic from database)
-            StatusLibrary.Log("Downloading server data files...");
-            int spireFileCount = 0;
             double totalBytes = 0;
+            int totalFilesDownloaded = 0;
+
+            // ============================================
+            // PHASE 1: Download Spire export files (dynamic from database)
+            // ============================================
+            StatusLibrary.Log("Downloading server data files from Spire...");
+            int spireFileCount = 0;
 
             foreach (var spireFile in SpireExports)
             {
@@ -455,6 +463,7 @@ namespace EQEmu_Patcher
                         StatusLibrary.Log($"  {displayName} ({generateSize(data.Length)})");
                         spireFileCount++;
                         totalBytes += data.Length;
+                        totalFilesDownloaded++;
                     }
                     else
                     {
@@ -466,20 +475,168 @@ namespace EQEmu_Patcher
                     StatusLibrary.Log($"  Failed to download {displayName}: {ex.Message}");
                 }
 
-                StatusLibrary.SetProgress((int)(((spireFileCount) / (double)SpireExports.Count) * 10000));
+                // Progress: 0-30% for Spire files
+                StatusLibrary.SetProgress((int)(((spireFileCount) / (double)SpireExports.Count) * 3000));
+            }
+
+            // ============================================
+            // PHASE 2: Download manifest and patch static files from GitHub
+            // ============================================
+            StatusLibrary.Log("");
+            StatusLibrary.Log("Checking for static file updates from GitHub...");
+            
+            try
+            {
+                // Download manifest
+                var manifestData = await Download(cts, ManifestUrl);
+                if (manifestData == null || manifestData.Length == 0)
+                {
+                    StatusLibrary.Log("  Warning: Could not download manifest");
+                }
+                else
+                {
+                    string manifestJson = System.Text.Encoding.UTF8.GetString(manifestData);
+                    var serializer = new JavaScriptSerializer();
+                    var manifest = serializer.Deserialize<PatchManifest>(manifestJson);
+
+                    if (manifest?.files == null || manifest.files.Count == 0)
+                    {
+                        StatusLibrary.Log("  Warning: Manifest contains no files");
+                    }
+                    else
+                    {
+                        string basePath = Path.GetDirectoryName(Application.ExecutablePath);
+                        string filesUrlPrefix = manifest.filesUrlPrefix;
+                        if (!filesUrlPrefix.EndsWith("/"))
+                        {
+                            filesUrlPrefix += "/";
+                        }
+
+                        int manifestFileCount = 0;
+                        int manifestFilesChecked = 0;
+                        int manifestFilesTotal = manifest.files.Count;
+                        List<KeyValuePair<string, string>> filesToDownload = new List<KeyValuePair<string, string>>();
+
+                        // First pass: check which files need updating
+                        foreach (var fileEntry in manifest.files)
+                        {
+                            if (isPatchCancelled)
+                            {
+                                StatusLibrary.Log("Patching cancelled.");
+                                return;
+                            }
+
+                            string relativePath = fileEntry.Key.Replace("/", "\\");
+                            string expectedHash = fileEntry.Value;
+                            string localPath = Path.Combine(basePath, relativePath);
+
+                            // Security check: ensure path is within EQ directory
+                            if (!UtilityLibrary.IsPathChild(relativePath))
+                            {
+                                continue;
+                            }
+
+                            bool needsDownload = false;
+
+                            if (!File.Exists(localPath))
+                            {
+                                needsDownload = true;
+                            }
+                            else
+                            {
+                                try
+                                {
+                                    string localHash = XXHash64.ComputeFileHash(localPath);
+                                    if (!string.Equals(localHash, expectedHash, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        needsDownload = true;
+                                    }
+                                }
+                                catch
+                                {
+                                    needsDownload = true;
+                                }
+                            }
+
+                            if (needsDownload)
+                            {
+                                filesToDownload.Add(fileEntry);
+                            }
+
+                            manifestFilesChecked++;
+                            // Progress: 30-40% for checking files
+                            StatusLibrary.SetProgress(3000 + (int)((manifestFilesChecked / (double)manifestFilesTotal) * 1000));
+                        }
+
+                        if (filesToDownload.Count == 0)
+                        {
+                            StatusLibrary.Log("  All static files are up to date.");
+                        }
+                        else
+                        {
+                            StatusLibrary.Log($"  {filesToDownload.Count} file(s) need updating...");
+
+                            int downloadedCount = 0;
+                            foreach (var fileEntry in filesToDownload)
+                            {
+                                if (isPatchCancelled)
+                                {
+                                    StatusLibrary.Log("Patching cancelled.");
+                                    return;
+                                }
+
+                                string relativePath = fileEntry.Key;
+                                string downloadUrl = filesUrlPrefix + relativePath.Replace("\\", "/");
+                                string localRelativePath = relativePath.Replace("/", "\\");
+                                string displayName = Path.GetFileName(relativePath);
+
+                                try
+                                {
+                                    StatusLibrary.Log($"  Downloading {displayName}...");
+                                    string result = await DownloadFile(cts, downloadUrl, localRelativePath);
+                                    if (string.IsNullOrEmpty(result))
+                                    {
+                                        // Get file size for reporting
+                                        string localPath = Path.Combine(basePath, localRelativePath);
+                                        if (File.Exists(localPath))
+                                        {
+                                            var fileInfo = new FileInfo(localPath);
+                                            totalBytes += fileInfo.Length;
+                                        }
+                                        manifestFileCount++;
+                                        totalFilesDownloaded++;
+                                        StatusLibrary.Log($"    {displayName} updated");
+                                    }
+                                    else
+                                    {
+                                        StatusLibrary.Log($"    Failed: {result}");
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    StatusLibrary.Log($"    Failed to download {displayName}: {ex.Message}");
+                                }
+
+                                downloadedCount++;
+                                // Progress: 40-100% for downloading files
+                                StatusLibrary.SetProgress(4000 + (int)((downloadedCount / (double)filesToDownload.Count) * 6000));
+                            }
+
+                            StatusLibrary.Log($"  Updated {manifestFileCount} static file(s).");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                StatusLibrary.Log($"  Error checking manifest: {ex.Message}");
             }
 
             StatusLibrary.SetProgress(10000);
             string elapsed = start.Elapsed.ToString("ss\\.ff");
-            
-            if (spireFileCount == SpireExports.Count)
-            {
-                StatusLibrary.Log($"Complete! Downloaded {spireFileCount} files ({generateSize(totalBytes)}) in {elapsed} seconds. Press Play to begin.");
-            }
-            else
-            {
-                StatusLibrary.Log($"Finished with warnings. Downloaded {spireFileCount}/{SpireExports.Count} files in {elapsed} seconds.");
-            }
+            StatusLibrary.Log("");
+            StatusLibrary.Log($"Complete! Downloaded {totalFilesDownloaded} files ({generateSize(totalBytes)}) in {elapsed} seconds.");
+            StatusLibrary.Log("Press Play to begin.");
             return;
         }
 
@@ -558,6 +715,23 @@ namespace EQEmu_Patcher
         public string date { get; set; }
         public string zip { get; set; }
         public int size { get; set; }
+    }
+
+    /// <summary>
+    /// Manifest structure matching manifest.json from GitHub
+    /// </summary>
+    public class PatchManifest
+    {
+        public string shortName { get; set; }
+        public string longName { get; set; }
+        public string customFilesUrl { get; set; }
+        public string filesUrlPrefix { get; set; }
+        public string version { get; set; }
+        public string website { get; set; }
+        public string description { get; set; }
+        public List<string> hosts { get; set; }
+        public List<string> required { get; set; }
+        public Dictionary<string, string> files { get; set; }
     }
 }
 
