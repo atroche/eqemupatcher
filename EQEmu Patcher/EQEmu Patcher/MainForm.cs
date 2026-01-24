@@ -56,6 +56,9 @@ namespace EQEmu_Patcher
         private async void MainForm_Load(object sender, EventArgs e)
         {
             isLoading = true;
+            
+            // Set the form icon to match the application icon
+            this.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
             version = Assembly.GetEntryAssembly().GetName().Version.ToString();
             Console.WriteLine($"Initializing {version}");
             Console.WriteLine($"Current Directory: {Directory.GetCurrentDirectory()}");
