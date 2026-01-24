@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -8,6 +8,9 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Net.Http;
 using System.Threading;
+using System.Reflection;
+using System.Diagnostics;
+using System.Web.Script.Serialization;
 using YamlDotNet.Core.Tokens;
 using System.Runtime.InteropServices.ComTypes;
 using System.Windows.Forms;
@@ -129,5 +132,207 @@ namespace EQEmu_Patcher
             }
             return true;
         }
+
+        #region Self-Update
+
+        // GitHub repository for update checks
+        private static readonly string GitHubApiUrl = "https://api.github.com/repos/atroche/eqemupatcher/releases/latest";
+
+        /// <summary>
+        /// Result of checking for patcher updates
+        /// </summary>
+        public class UpdateCheckResult
+        {
+            public bool UpdateAvailable { get; set; }
+            public string CurrentVersion { get; set; }
+            public string LatestVersion { get; set; }
+            public string DownloadUrl { get; set; }
+            public string Error { get; set; }
+        }
+
+        /// <summary>
+        /// Check GitHub releases for a newer version of the patcher
+        /// </summary>
+        public static async Task<UpdateCheckResult> CheckForUpdateAsync(CancellationTokenSource cts)
+        {
+            var result = new UpdateCheckResult
+            {
+                CurrentVersion = Assembly.GetEntryAssembly().GetName().Version.ToString(),
+                UpdateAvailable = false
+            };
+
+            try
+            {
+                using (var client = new HttpClient())
+                {
+                    // GitHub API requires a User-Agent header
+                    client.DefaultRequestHeaders.Add("User-Agent", "EQEmuPatcher");
+                    client.DefaultRequestHeaders.Add("Accept", "application/vnd.github.v3+json");
+
+                    var response = await client.GetAsync(GitHubApiUrl, cts.Token);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        result.Error = $"GitHub API returned {response.StatusCode}";
+                        return result;
+                    }
+
+                    var json = await response.Content.ReadAsStringAsync();
+                    var serializer = new JavaScriptSerializer();
+                    var release = serializer.Deserialize<Dictionary<string, object>>(json);
+
+                    if (release == null || !release.ContainsKey("tag_name"))
+                    {
+                        result.Error = "Invalid release data from GitHub";
+                        return result;
+                    }
+
+                    result.LatestVersion = release["tag_name"].ToString();
+
+                    // Find the .exe asset
+                    if (release.ContainsKey("assets"))
+                    {
+                        var assets = release["assets"] as System.Collections.ArrayList;
+                        if (assets != null)
+                        {
+                            foreach (Dictionary<string, object> asset in assets)
+                            {
+                                if (asset.ContainsKey("name") && asset["name"].ToString().EndsWith(".exe"))
+                                {
+                                    result.DownloadUrl = asset["browser_download_url"].ToString();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Compare versions
+                    if (IsNewerVersion(result.CurrentVersion, result.LatestVersion))
+                    {
+                        result.UpdateAvailable = true;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                result.Error = ex.Message;
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Compare version strings to determine if remote is newer
+        /// </summary>
+        private static bool IsNewerVersion(string current, string latest)
+        {
+            try
+            {
+                // Parse versions, handling formats like "1.0.6.123" or "v1.0.6.123"
+                current = current.TrimStart('v', 'V');
+                latest = latest.TrimStart('v', 'V');
+
+                var currentParts = current.Split('.').Select(p => int.TryParse(p, out int n) ? n : 0).ToArray();
+                var latestParts = latest.Split('.').Select(p => int.TryParse(p, out int n) ? n : 0).ToArray();
+
+                // Pad arrays to same length
+                int maxLen = Math.Max(currentParts.Length, latestParts.Length);
+                Array.Resize(ref currentParts, maxLen);
+                Array.Resize(ref latestParts, maxLen);
+
+                for (int i = 0; i < maxLen; i++)
+                {
+                    if (latestParts[i] > currentParts[i]) return true;
+                    if (latestParts[i] < currentParts[i]) return false;
+                }
+
+                return false; // Versions are equal
+            }
+            catch
+            {
+                return false; // If parsing fails, assume no update
+            }
+        }
+
+        /// <summary>
+        /// Download and apply the patcher update, then restart
+        /// </summary>
+        /// <returns>True if update was applied and app should exit, false otherwise</returns>
+        public static async Task<bool> ApplyUpdateAsync(CancellationTokenSource cts, string downloadUrl, Action<string> logCallback)
+        {
+            string currentExe = Application.ExecutablePath;
+            string newExe = currentExe + ".new";
+            string oldExe = currentExe + ".old";
+
+            try
+            {
+                logCallback?.Invoke("Downloading patcher update...");
+
+                // Download new version
+                using (var client = new HttpClient())
+                {
+                    client.DefaultRequestHeaders.Add("User-Agent", "EQEmuPatcher");
+                    
+                    var response = await client.GetAsync(downloadUrl, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+                    response.EnsureSuccessStatusCode();
+
+                    using (var stream = await response.Content.ReadAsStreamAsync())
+                    using (var fileStream = File.Create(newExe))
+                    {
+                        await stream.CopyToAsync(fileStream, 81920, cts.Token);
+                    }
+                }
+
+                logCallback?.Invoke("Download complete. Applying update...");
+
+                // Delete old backup if it exists
+                if (File.Exists(oldExe))
+                {
+                    File.Delete(oldExe);
+                }
+
+                // Rename current exe to .old (Windows allows renaming running executables)
+                File.Move(currentExe, oldExe);
+
+                // Rename new exe to current name
+                File.Move(newExe, currentExe);
+
+                logCallback?.Invoke("Update applied! Restarting patcher...");
+
+                // Start new process with --updated flag
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = currentExe,
+                    Arguments = "--updated",
+                    WorkingDirectory = Path.GetDirectoryName(currentExe),
+                    UseShellExecute = true
+                };
+                Process.Start(startInfo);
+
+                return true; // Signal that app should exit
+            }
+            catch (Exception ex)
+            {
+                logCallback?.Invoke($"Update failed: {ex.Message}");
+
+                // Try to clean up
+                try
+                {
+                    if (File.Exists(newExe))
+                    {
+                        File.Delete(newExe);
+                    }
+                    // If we renamed the exe but failed after, try to restore
+                    if (!File.Exists(currentExe) && File.Exists(oldExe))
+                    {
+                        File.Move(oldExe, currentExe);
+                    }
+                }
+                catch { }
+
+                return false;
+            }
+        }
+
+        #endregion
     }
 }

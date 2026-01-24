@@ -27,6 +27,7 @@ namespace EQEmu_Patcher
         bool isLoading;
         bool isAutoPatch = false;
         bool isAutoPlay = false;
+        bool isCheckingForUpdates = false;
         CancellationTokenSource cts;
         System.Diagnostics.Process process;
 
@@ -191,7 +192,72 @@ namespace EQEmu_Patcher
             {
                 splashLogo.Load(path);
             }
-            cts.Cancel();
+
+            // Check if we just updated
+            var args = Environment.GetCommandLineArgs();
+            if (args.Length > 1 && args[1] == "--updated")
+            {
+                StatusLibrary.Log("Patcher updated successfully!");
+            }
+
+            // Check for patcher updates in the background
+            cts = new CancellationTokenSource();
+            await CheckForPatcherUpdateAsync();
+        }
+
+        /// <summary>
+        /// Check for updates to the patcher itself
+        /// </summary>
+        private async Task CheckForPatcherUpdateAsync()
+        {
+            if (isCheckingForUpdates) return;
+            isCheckingForUpdates = true;
+
+            try
+            {
+                var updateResult = await UtilityLibrary.CheckForUpdateAsync(cts);
+
+                if (updateResult.Error != null)
+                {
+                    Console.WriteLine($"Update check error: {updateResult.Error}");
+                    // Don't show error to user - just silently continue
+                    return;
+                }
+
+                if (updateResult.UpdateAvailable && !string.IsNullOrEmpty(updateResult.DownloadUrl))
+                {
+                    var result = MessageBox.Show(
+                        $"A new version of the patcher is available!\n\n" +
+                        $"Current version: {updateResult.CurrentVersion}\n" +
+                        $"New version: {updateResult.LatestVersion}\n\n" +
+                        $"Would you like to update now?",
+                        "Patcher Update Available",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Information);
+
+                    if (result == DialogResult.Yes)
+                    {
+                        bool shouldExit = await UtilityLibrary.ApplyUpdateAsync(
+                            cts, 
+                            updateResult.DownloadUrl, 
+                            (msg) => StatusLibrary.Log(msg));
+
+                        if (shouldExit)
+                        {
+                            this.Close();
+                            return;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Update check exception: {ex.Message}");
+            }
+            finally
+            {
+                isCheckingForUpdates = false;
+            }
         }
 
         private void detectClientVersion()
